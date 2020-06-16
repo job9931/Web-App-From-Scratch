@@ -2,6 +2,7 @@
 
 
 import socket
+import typing
 
 HOST = "127.0.0.1" #server address
 PORT = 9000
@@ -13,6 +14,41 @@ Content-type: text/html
 Content-length: 15
 
 <h1>Hello!</h1>""".replace(b"\n", b"\r\n")
+
+
+
+def parse_request(socket:socket.socket,bufsize: int=16_384) -> typing.Generator[bytes, None, bytes]: #note16_384 = 16,384
+    #-> typing.Generator[bytes, None, bytes]:
+    '''Reads individual CRLF-spearated lines from a socket in bufsize segments.
+        
+    Inputs:
+        socket: socket object.
+        bufsize: number of bytes to read at once.
+            
+    Yields: 
+        data: represented as a bytes object.            
+    '''
+        
+    buffer = b"" #initialise bytes literal
+    while True: #loop forever
+        data = socket.recv(bufsize) #read data from socket
+        if not data: #if data is empty
+            return b""
+            
+        buffer += data #add data into the buffer
+            
+        while True:
+            try:
+                i = buffer.index(b"\r\n") #get index of CRLF separator 
+                line, buffer = buffer[:i],buffer[i+2:] #split buffer into separate lines
+                if not line: #if line is empty
+                    return buffer
+                    
+                yield line #yield each line then continues
+                
+            except IndexError: #break if CRLF separator not found
+                break
+
 
 # Create a TCP/IP socket using socket.socket() with default parameters
 with socket.socket() as s:
@@ -38,7 +74,11 @@ with socket.socket() as s:
     while True: #keeps server open permanantly.
         client_socket, client_address = s.accept()
         print(f"New connection from {client_address}.")
-        #Send back response using sendall()
+        
     
+        #begin printing request messages
         with client_socket:
-            client_socket.sendall(RESPONSE)
+            for line in parse_request(client_socket): #for each parsed line
+                print(line)
+            client_socket.sendall(RESPONSE) #send Hello! reponse
+           
