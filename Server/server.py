@@ -1,23 +1,49 @@
-'''This program is a simple server which returns Hello! to all requests.'''
-
+'''This program is a simple server which serves files.'''
 
 import socket
 import typing
+import mimetypes
+import os
 
 HOST = "127.0.0.1" #server address
 PORT = 9000
 
+#Where the server should serve files from 
+SERVER_ROOT = os.path.abspath("www")
 
-RESPONSE = b"""\
+#make not found default file server response
+NOT_FOUND_RESPONSE = b"""\
+HTTP/1.1 404 Not Found
+Content-type: text/plain
+Content-length: 9
+
+Not Found""".replace(b"\n", b"\r\n")
+
+#Not allowed response for requests we dont permit
+METHOD_NOT_ALLOWED_RESPONSE = b"""\
+HTTP/1.1 405 Method Not Allowed
+Content-type: text/plain
+Content-length: 17
+
+Method Not Allowed""".replace(b"\n", b"\r\n")
+
+BAD_REQUEST_RESPONSE = b"""\
+HTTP/1.1 400 Bad Request
+Content-type: text/plain
+Content-length: 11
+
+Bad Request""".replace(b"\n", b"\r\n")
+
+
+FILE_RESPONSE_TEMPLATE = """\
 HTTP/1.1 200 OK
-Content-type: text/html
-Content-length: 15
+Content-type: {content_type}
+Content-length: {content_length}
 
-<h1>Hello!</h1>""".replace(b"\n", b"\r\n")
+""".replace("\n", "\r\n")
 
 
-
-def parse_request(socket:socket.socket,bufsize: int=16_384) -> typing.Generator[bytes, None, bytes]: #note16_384 = 16,384
+def parse_request(socket,bufsize=16_384): #note16_384 = 16,384
     #-> typing.Generator[bytes, None, bytes]:
     '''Reads individual CRLF-spearated lines from a socket in bufsize segments.
         
@@ -48,8 +74,80 @@ def parse_request(socket:socket.socket,bufsize: int=16_384) -> typing.Generator[
                 
             except IndexError: #break if CRLF separator not found
                 break
+                
+def serve_file(sock: socket.socket, path: str) -> None:
+    '''Given a socket and the relative path to a file (relative to
+    SERVER_SOCK), send that file to the socket if it exists.  If the
+    file does not exist, sent '404 Not Found' response.'''
+    
+    #construct path to file
+    if path == "/":
+        path = "/index.html"
+    
+    abspath = os.path.normpath(os.path.join(SERVER_ROOT, path.lstrip("/")))
+    if not abspath.startswith(SERVER_ROOT):
+        sock.sendall(NOT_FOUND_RESPONSE)
+        return
 
+    try:
+        with open(abspath, "rb") as f:#open file
+            stat = os.fstat(f.fileno()) #get file descriptor and estimate attributes (size)
+            content_type, encoding = mimetypes.guess_type(abspath)#guess file type based on URL
+            if content_type is None:#check for content
+                content_type = "application/octet-stream"
 
+            if encoding is not None:#check encoding
+                content_type += f"; charset={encoding}"
+            
+            #construct response from template
+            response_headers = FILE_RESPONSE_TEMPLATE.format(
+                content_type=content_type,
+                content_length=stat.st_size,
+            ).encode("ascii")
+
+            sock.sendall(response_headers)#write file to socket
+            sock.sendfile(f)
+    except FileNotFoundError:#notify if file not found 
+        sock.sendall(NOT_FOUND_RESPONSE)
+        return 
+    
+    
+
+class Request(typing.NamedTuple):
+    method: str
+    path: str
+    headers: typing.Mapping[str, str]
+
+    @classmethod
+    def from_socket(cls, sock: socket.socket) -> "Request":
+        """Read and parse the request from a socket object.
+
+        Raises:
+          ValueError: When the request cannot be parsed.
+        """
+        lines = parse_request(sock) #parse lines using external function
+
+        try:
+            request_line = next(lines).decode("ascii")#decode bytearray into string
+        except StopIteration:
+            raise ValueError("Request line missing.")
+
+        try:
+            method, path, _ = request_line.split(" ") #extract method and path attributes
+        except ValueError:
+            raise ValueError(f"Malformed request line {request_line!r}.")
+
+        headers = {}#headers are mapping from str to str (dictionary)
+        for line in lines:
+            try:
+                name, _, value = line.decode("ascii").partition(":")#Extract header info
+                headers[name.lower()] = value.lstrip()#add to dictionary
+            except ValueError:
+                raise ValueError(f"Malformed header line {line!r}.")
+                
+        #return a Request object 
+        return cls(method=method.upper(), path=path, headers=headers)
+    
 # Create a TCP/IP socket using socket.socket() with default parameters
 with socket.socket() as s:
     
@@ -74,11 +172,16 @@ with socket.socket() as s:
     while True: #keeps server open permanantly.
         client_socket, client_address = s.accept()
         print(f"New connection from {client_address}.")
-        
     
-        #begin printing request messages
+        #Insert a try-except block to handle bad requests
         with client_socket:
-            for line in parse_request(client_socket): #for each parsed line
-                print(line)
-            client_socket.sendall(RESPONSE) #send Hello! reponse
-           
+            try:
+                request = Request.from_socket(client_socket)
+                if request.method != 'GET':
+                    client_socket.sendall(METHOD_NOT_ALLOWED_RESPONSE)
+                    continue
+                    
+                serve_file(client_socket,request.path)#serve file  
+            except Exception as e:
+                print(f"Failed to parse request: {e}")
+                client_socket.sendall(BAD_REQUEST_RESPONSE)
